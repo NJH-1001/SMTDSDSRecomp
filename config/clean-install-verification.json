@@ -1,0 +1,36 @@
+{
+  "format": 1,
+  "scope": "local clean-install startup verification, not a full gameplay pass",
+  "input_manifest_sha256": "dc3bc9e2d849863fefb862e15fc623d4e27b0c021ad9bd3508e54debc7969ccc",
+  "vblank_irq9": 1200,
+  "vblank_irq7": 1217,
+  "rgb_sha256": "1852d602bb0bd94e6b0334292097ba7e4d16e8c1118b985b76bdc2d19e72d586",
+  "coverage": {
+    "tier3_entries9": 0,
+    "tier3_entries7": 1,
+    "tier3_insns9": 0,
+    "tier3_insns7": 1,
+    "clean_ram_rejects9": 0,
+    "clean_ram_rejects7": 0,
+    "canonical_entries9": 0,
+    "canonical_entries7": 1
+  },
+  "dispatch_miss_logs": 0,
+  "retail_bios_firmware_boot": true,
+  "direct_boot": false,
+  "static_discovery_override": false,
+  "preexisting_private_capture_inputs": false,
+  "private_payloads_uploaded": false,
+  "native_build": {
+    "url": "https://github.com/NJH-1001/SMTDSDSRecomp/actions/runs/41423039468",
+    "commit": "5a7ca6b1573d24f9ecfd4f6a731ca16321c22621",
+    "result": "success",
+    "platforms": [
+      "Windows-x86_64",
+      "Linux-x86_64",
+      "macOS-x86_64",
+      "macOS-arm64"
+    ],
+    "scope": "native setup host and synthetic-input full player compiler/linker checks; not commercial gameplay"
+  }
+}

@@ -3,8 +3,10 @@
 Release destination: <https://github.com/njh-1001/SMTDSDSRecomp>.
 
 Release preparation now includes a clean local bank-generation installer.
-The original Windows proof passed. Exported-source and native CI compiler/package
-checks are tracked separately; never treat a prepared job as a passing build.
+The development-source and exported-source Windows install proofs passed. Native
+setup hosts and full synthetic-input player compiler/linker checks passed on all
+four platforms in [the release build run](https://github.com/NJH-1001/SMTDSDSRecomp/actions/runs/41423039468).
+These are build checks, not macOS/Linux gameplay verification.
 
 Public downloads must be source/build/setup kits that require each player to
 provide their own legally obtained ROM, ARM9 BIOS, ARM7 BIOS, and firmware.
@@ -47,7 +49,8 @@ instruction counts are at most 16 ARM9 / 1 ARM7 on the accepted startup route.
 The Windows development-source proof reached 0 ARM9 / 1 ARM7 instructions,
 zero clean-RAM rejections, and exact opening RGB hash
 `1852d602bb0bd94e6b0334292097ba7e4d16e8c1118b985b76bdc2d19e72d586`.
-An exported-source proof is a separate required artifact check. Mutable build
+The exported-source proof independently reached the same hash and 0/1 instruction
+counts, with no dispatch-miss logs. Mutable build
 inputs, captures, generated C, player binaries and proof logs stay private.
 
 Public kits contain audited source snapshots of the exact framework, ARM core

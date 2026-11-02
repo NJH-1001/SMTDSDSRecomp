@@ -1,8 +1,8 @@
 {
   "format": 1,
   "files": {
-    "README.md": "4c3064c90170d437e19cc59c8befa5f8ee082051be9de8e84228ab229e1b5890",
-    "PUBLIC_DISTRIBUTION.md": "3cefc5a085be7a34b081812b7d61ac3368a352927dcf582d85df44807efa1639",
+    "README.md": "8e007348b05428e334e580a52864efd3644a9bd1ba3b46573d1fb2eb34241bda",
+    "PUBLIC_DISTRIBUTION.md": "8dae6d715ca9bdfff9e7b70e0a020cd997ecdc53d1905e59cc9b993681fc3723",
     "NOTICE.md": "894c8a6f5b5bea0ccf2095e75692a33e005bb6684c85c1bbc398c595f2c6a4a0",
     "LICENSE": "2355c8f9a25522ac6a07ce9e3d33b7b7512b309cee489fd0681c272210b79820",
     ".gitignore": "2186ea8bfdb25a392a6b0ae20caa29599badbcfb2114d8a18468b80dc604b46e",
@@ -507,6 +507,7 @@
     "game.toml": "dd41e44dfa3d60d3c20517c13437fc61e9ff026488c95d8b71f8b9162267a0a8",
     ".gitattributes": "5a7adb9903a1edec5be60a2b8e4ddd033d9a985bb178941b61647265fc8fe6c4",
     "deps/ndsrecomp/launcher/nds_input_bindings.h": "07a40650f74bb10860b196e83e5d3eff3bc8d2143eda8cd04c87624125339c2a",
-    "tools/audit_package.py": "811e6d07587b365646e6028aef45102a9b34338daa946cde14ea2bef4e06c27e"
+    "tools/audit_package.py": "811e6d07587b365646e6028aef45102a9b34338daa946cde14ea2bef4e06c27e",
+    "config/clean-install-verification.json": "0594fa5393f6cd12f4d1103a07cec730c0fac89b057660411ee2035804d07513"
   }
 }

@@ -54,7 +54,8 @@ Extract the complete platform ZIP to a writable folder. Keep its `tools`,
 `config`, `deps`, and `game.toml` beside `SMTDSDSRecomp-Setup`. Setup is a console
 application; on macOS/Linux, run it from Terminal. Windows targets Intel/AMD
 x86-64; macOS has separate Intel x86-64 and Apple Silicon arm64 builds; Linux
-x86-64 is built on Ubuntu 24.04. Builds are unsigned and macOS is not notarized.
+x86-64 is built on Ubuntu 24.04. The macOS setup hosts require macOS 15 or newer.
+Builds are unsigned and macOS is not notarized.
 
 Install **Python 3.11+**, **Git**, **CMake 3.20+**, **Ninja**, and a C/C++ compiler
 and put them on PATH. Setup builds pinned SDL 3.4.10 locally unless you provide
