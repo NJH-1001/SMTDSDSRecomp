@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import tomllib
+import uuid
 
 from verify_inputs import identity
 
@@ -38,6 +39,7 @@ class Installer:
         self.title_dir = self.work / "title-banks"
         self.rc = executable(self.work / "recompiler", "nds_recompile")
         self.log = self.work / "install.log"
+        self.session = uuid.uuid4().hex[:12]
 
     def run(self, *command):
         print("Running:", Path(str(command[0])).name, " ".join(str(x) for x in command[1:3]), flush=True)
@@ -62,7 +64,7 @@ class Installer:
         self.run(*command)
 
     def promote(self, manifests, generation):
-        ingest=self.work / f"coverage-{generation}"
+        ingest=self.work / f"coverage-{self.session}-{generation}"
         self.run(sys.executable,self.framework / "tools/ingest_coverage_manifests.py",*manifests,
                  "--out",ingest,"--images",self.work / "images","--rom-sha1",ROM_SHA1,"--bank-prefix","smtds")
         report=json.loads((ingest / "ingest-report.json").read_text())
@@ -75,8 +77,8 @@ class Installer:
     def capture(self, player, name):
         sys.path.insert(0, str(self.framework / "oracle"))
         from _client import DebugClient
-        folder = self.work / name
-        folder.mkdir(exist_ok=True)
+        folder = self.work / f"{name}-{self.session}"
+        folder.mkdir()
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             port = listener.getsockname()[1]

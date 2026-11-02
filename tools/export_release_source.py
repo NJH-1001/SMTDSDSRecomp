@@ -47,7 +47,7 @@ def export(destination):
             if path.is_file():
                 rel=path.relative_to(ROOT)
                 # Developer probe scripts are not part of the installation API.
-                if folder=="tools" and path.name not in {"install.py","play.py","verify_inputs.py","ci_compile.py","export_release_source.py","package_release.py","prepare_dependencies.py","bootstrap_sdl.py"}:
+                if folder=="tools" and path.name not in {"install.py","play.py","verify_inputs.py","ci_compile.py","export_release_source.py","package_release.py","prepare_dependencies.py","bootstrap_sdl.py","audit_package.py"}:
                     continue
                 copy(ROOT,rel,rel)
     framework=ROOT.parent / "ndsrecomp"
@@ -60,7 +60,6 @@ def export(destination):
         keep|=rel.as_posix()=="launcher/nds_input_bindings.h"
         keep|=rel.name in {"LICENSE","LICENSE-GPL","LICENSE-MIT","VERSION"} and len(rel.parts)==1
         # The open-source fallback BIOS is generated on the user's machine too.
-        keep|=rel.as_posix()=="vendor/freebios/freebios_images.h"
         if keep:
             copy(framework,rel,Path("deps/ndsrecomp") / rel)
     core=framework / "external/arm-recomp-core"

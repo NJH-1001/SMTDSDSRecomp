@@ -11,8 +11,8 @@
     "config/required-inputs.json": "dc3bc9e2d849863fefb862e15fc623d4e27b0c021ad9bd3508e54debc7969ccc",
     "tools/bootstrap_sdl.py": "75e42a42dee0323a403d719eb0010f16727a6637b792cab4be250e3abf3625cb",
     "tools/ci_compile.py": "33c7b505e9773f8e0ef9bb2e5199c8cdf8e6e98f604305beb1e79d54526ad7fc",
-    "tools/export_release_source.py": "9d13a326868b328d1c7df001e12c70dd25a516cc1117a34711af20a9b5220855",
-    "tools/install.py": "c4e16f72c772e9e5647168e51b3511bbdf61eb8bd9e132df3a9fdc83180f6261",
+    "tools/export_release_source.py": "31aa515eb8fbb0a4cf0d59da2adebaf088883a281f28cba90d6467bb820d9fac",
+    "tools/install.py": "d305dd17d7acc0c4dee9aada3045e740e994834cbd6200890d38f66ffe0d1b53",
     "tools/package_release.py": "3511acaa29d1030f03e01c73071074577598b9bfab57080bc3a1a335e3558622",
     "tools/play.py": "6daabbe177f3858fda27f853bdba85622a36b48dfa57d3f7361f16bef466764c",
     "tools/prepare_dependencies.py": "a18517ff1bb8e23c385cfd9e285aa6cb2438d0cf56e3d9d37033bc53de2250d8",
@@ -21,7 +21,7 @@
     "setup/main.cpp": "120e758ba6b957e795dedd9123f9e4dacc2f53e6297756a66deb7106e6315077",
     "docs/DISPLAY_OPTIONS.md": "21ef2ac6404df644bbd7ef4fe8bd6643ed86007f280ae0a764c64d979cf3a05d",
     "docs/KEYBOARD_CONTROLS.md": "7caffa129222ea9a99e9fccf461b8823264f77e8e79fffff31be79cfaf19c835",
-    ".github/workflows/setup-builds.yml": "ee6fa4fe5c7900bcb5711e06d511614db17d514f13c32c122a32f5baea950828",
+    ".github/workflows/setup-builds.yml": "03a16e78cf624d19256e1ec08b95fc67e8e01e6233fce756b3b8e31babfed883",
     "deps/ndsrecomp/bios/biosnds7.toml": "b5b625b19f52d867c97bc6f2a3929e997d3b2b11d5900a16393a8dafc29cb0d7",
     "deps/ndsrecomp/bios/biosnds9.toml": "9b6de4f9a832194ffbba6830d82758f4c2181cd252efbbeb708237a9c905c785",
     "deps/ndsrecomp/bios/firmware_banks/fw_arm7_calibration_save.toml": "1c74e1c0b24878f90b4d3a21f9a82e01072a01a4cabc0ffdb4624b7b685ab099",
@@ -174,7 +174,7 @@
     "deps/ndsrecomp/runner/src/keyboard_layout.h": "7ebf74ecc15c2f25a789f68a3463a4ee23733f8c6ccfd2ddaa72849c4aeb0326",
     "deps/ndsrecomp/runner/src/live_overlay.cpp": "c478173ea43611be5a250fc73a2e2159df84df22535317544bb64ad3a42a3f23",
     "deps/ndsrecomp/runner/src/live_overlay.h": "883518390cdcce9ee8a73fbf1e4ec4fca9ce1e8ae12728a1e253ea1f781877e9",
-    "deps/ndsrecomp/runner/src/live_overlay_platform.cpp": "edac01e21a572566bc1af7961107323bfc7ef8dc7377621db800de600ebb2b2d",
+    "deps/ndsrecomp/runner/src/live_overlay_platform.cpp": "05b4c67032f69f75adfe25ed7813a3a4ade9444d19185f3c6dc5198ed5306646",
     "deps/ndsrecomp/runner/src/live_overlay_platform.h": "8fce218459d0164e0495a48e27aa0607f6390e89884f93835d2bfb5879d6e6e5",
     "deps/ndsrecomp/runner/src/main.cpp": "3b23044af352eba670c12959456837a39abc153b5bb2a0347536777f68536809",
     "deps/ndsrecomp/runner/src/melonds_compute/CaptureReference.cpp": "4a38c2acbdc853712395c8dcab0545efedb450e7615cac6801f8eb746d0ca535",
@@ -463,7 +463,6 @@
     "deps/ndsrecomp/tools/gen_freebios_embed.py": "97cda9866fb0c2f1ed4047c572840ccbfd8ee71b7363af240dfbb269e185d059",
     "deps/ndsrecomp/tools/ingest_coverage_manifests.py": "6ca1a5ecea9c06e687f8660f01904bca0f092cb1a14a212bc305790461ac1925",
     "deps/ndsrecomp/tools/rom_alias.py": "fdc38e36d8a0efa3dd4a2882000715934dbff8be2b0a18efcc411a4475f17b6f",
-    "deps/ndsrecomp/vendor/freebios/freebios_images.h": "ae4888006342d1d44ca0978be0e2cd2c16f92eac4fda803eb18a3263a0ddbac6",
     "deps/ndsrecomp/VERSION": "2d49ce6edf3fdc05573906304b1718aba2280e6a9cd034651458fcfcba3fd0d1",
     "deps/ndsrecomp/external/arm-recomp-core/cmake/ArmRecompCore.cmake": "8cd772d1d5012ea16baa3603b2f0dbab6c36feacc9b06ca1d5e742f9a3040627",
     "deps/ndsrecomp/external/arm-recomp-core/common/arm_decode.cpp": "04ec103a055e9190297dca51d151dd76c3d5a641aee6085581bb3ea7ea8d78d3",
@@ -507,6 +506,7 @@
     "deps/recomp-ui/src/common/launcher_theme.h": "9248739339ac2afb7112ae3172e492faca788b91ad17389d8fd961f227721b6f",
     "game.toml": "dd41e44dfa3d60d3c20517c13437fc61e9ff026488c95d8b71f8b9162267a0a8",
     ".gitattributes": "5a7adb9903a1edec5be60a2b8e4ddd033d9a985bb178941b61647265fc8fe6c4",
-    "deps/ndsrecomp/launcher/nds_input_bindings.h": "07a40650f74bb10860b196e83e5d3eff3bc8d2143eda8cd04c87624125339c2a"
+    "deps/ndsrecomp/launcher/nds_input_bindings.h": "07a40650f74bb10860b196e83e5d3eff3bc8d2143eda8cd04c87624125339c2a",
+    "tools/audit_package.py": "811e6d07587b365646e6028aef45102a9b34338daa946cde14ea2bef4e06c27e"
   }
 }

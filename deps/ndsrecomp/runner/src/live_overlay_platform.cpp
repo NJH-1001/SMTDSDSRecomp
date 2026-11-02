@@ -66,6 +66,10 @@ bool live_overlay_is_final_library_path(const std::filesystem::path& path) {
 
 std::string live_overlay_bundled_tcc_command(
     const std::filesystem::path& exe_dir) {
+#if !defined(_WIN32) && !defined(__linux__)
+    (void)exe_dir;
+    return {};
+#else
     std::error_code ec;
     const auto toolchain = exe_dir / "overlay_toolchain";
 #if defined(_WIN32)
@@ -104,4 +108,5 @@ std::string live_overlay_bundled_tcc_command(
         " --runner-exe " + shell_quote(runner) +
         " --compiler tcc --tcc " + shell_quote(tcc) +
         " --include-roots --min-hits 8";
+#endif
 }

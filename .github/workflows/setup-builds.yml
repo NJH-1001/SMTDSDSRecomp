@@ -36,13 +36,20 @@ jobs:
       - name: Linux display/audio development headers
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libpulse-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxtst-dev libxfixes-dev libxss-dev libwayland-dev libxkbcommon-dev libegl1-mesa-dev
-      - name: Configure Windows compiler environment
+      - name: Install Windows MinGW Clang toolchain
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          install: mingw-w64-clang-x86_64-clang
       - name: Select Clang on Windows
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
         run: |
+          "$env:MSYS2_ROOT\clang64\bin" >> $env:GITHUB_PATH
           "CC=clang" >> $env:GITHUB_ENV
           "CXX=clang++" >> $env:GITHUB_ENV
       - name: Audit source before generating any build artifacts
@@ -62,14 +69,15 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
-          import json, shutil
+          import json, subprocess
           from pathlib import Path
           # Reconstruct pristine manifest-listed source after CI's temporary
           # dependency/build writes. None of those outputs enter this stage.
           manifest=json.loads(Path('SOURCE_MANIFEST.json').read_text())
           root=Path('build-public-source');root.mkdir()
           for name in [*manifest['files'],'SOURCE_MANIFEST.json']:
-              dst=root/name;dst.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(name,dst)
+              dst=root/name;dst.parent.mkdir(parents=True,exist_ok=True)
+              dst.write_bytes(subprocess.check_output(['git','show','HEAD:'+name]))
           PY
           suffix=""; if [ "${{ runner.os }}" = "Windows" ]; then suffix=".exe"; fi
           python tools/package_release.py --source build-public-source --setup "build-setup/SMTDSDSRecomp-Setup${suffix}" --platform "${{ matrix.platform }}" --output "dist/SMTDSDSRecomp-Setup-${{ matrix.platform }}.zip"
