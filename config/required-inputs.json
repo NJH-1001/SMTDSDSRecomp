@@ -1,0 +1,38 @@
+{
+  "format": 1,
+  "hash_scope": "whole unmodified file; CRC-32/ISO-HDLC",
+  "files": [
+    {
+      "id": "rom",
+      "filename": "Shin Megami Tensei - Devil Survivor (USA).nds",
+      "size": 67108864,
+      "crc32": "b771bbc4",
+      "sha1": "20a16088f0f1b67a11dd93a5a1976a702f8eaef7",
+      "sha256": "df72364a1d6aa034c227b3b7a73e4e5c1107f3437d9d1833e72db99c31266c4a"
+    },
+    {
+      "id": "bios9",
+      "filename": "biosnds9.rom",
+      "size": 4096,
+      "crc32": "2ab23573",
+      "sha1": "bfaac75f101c135e32e2aaf541de6b1be4c8c62d",
+      "sha256": "1693983a7707ae394786fa526c0552457888a51d4e410d715ef07acd5a540555"
+    },
+    {
+      "id": "bios7",
+      "filename": "biosnds7.rom",
+      "size": 16384,
+      "crc32": "1280f0d5",
+      "sha1": "24f67bdea115a2c847c8813a262502ee1607b7df",
+      "sha256": "ba65f690eb04ec92db67c0e299e21ad71de087d6d5de8a9cb17a62eaab563c17"
+    },
+    {
+      "id": "firmware",
+      "filename": "firmware.bin",
+      "size": 262144,
+      "crc32": "6133798d",
+      "sha1": "ae22de59fbf3f35ccfbeacaeba6fa87ac5e7b14b",
+      "sha256": "dda30945f375dcefa14127a4924f7c8757e56c7c2fb0b61f80302ef586a8da45"
+    }
+  ]
+}

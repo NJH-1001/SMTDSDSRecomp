@@ -1,0 +1,665 @@
+// mem_timing_test.cpp — bit-exactness rail for the fused timed-access fast
+// path (beads-yjp.70 phase 2 B).
+//
+// WHAT THIS PINS
+// --------------
+// Generated code calls runtime_mem_cycles(ea, width, seq) and then
+// bus_read/write_*(ea) back to back for EVERY guest load and store. The
+// timing half used to be an out-of-line call in runner/src/bus.cpp that
+// re-decoded the region and walked all eight CP15 MPU protection regions
+// per access. It is now an inline fast path in
+// recompiler/armv4t/runtime_arm.h reading two pieces of published derived
+// state: the g_memt_* TCM mirrors and a page-granular CP15 cacheability
+// bitmap.
+//
+// Derived state is exactly where a timing model silently rots: a mirror
+// that is not republished on some path that moves TCM, or a bitmap whose
+// region fill is off by a page, changes guest cycle counts — which changes
+// scheduler interleaving, which changes the game. So the ORIGINALS are kept
+// in the tree under _reference names (runtime_mem_cycles_reference,
+// cp15_{data,code}_cacheable_reference) and this test sweeps every region
+// boundary against them:
+//
+//   * every documented DS map boundary and both TCM windows' edges, each
+//     probed at -4..+4 bytes and at +/- one 4 KiB page;
+//   * widths 1/2/4, sequential 0/1;
+//   * both CPUs;
+//   * a set of CP15 configurations covering MPU off / on, D-cache and
+//     I-cache independently on/off, TCM off / on / moved / oversized, and a
+//     deliberately SUB-PAGE MPU region — the one encoding the bitmap cannot
+//     represent, where g_cp15_class_ready must go to 0 and every consumer
+//     must fall back to the walk and STILL agree.
+//
+// Any disagreement is a guest-visible cycle-count change and fails here.
+
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+
+#include "runtime_arm.h"
+#include "state.h"
+#include "native_ram.h"
+#include "native_store_pages.h"
+#include <unordered_set>
+#include "savestate.h"
+extern uint8_t g_test_wramcnt;
+
+extern "C" uint32_t runtime_mem_cycles_slow(uint32_t addr, uint32_t width,
+                                            uint32_t sequential);
+extern "C" uint32_t runtime_mem_cycles_reference(uint32_t addr, uint32_t width,
+                                                uint32_t sequential);
+
+namespace {
+
+int g_failures = 0;
+long long g_checks = 0;
+
+void fail(const std::string& what) {
+    if (++g_failures <= 40) std::fprintf(stderr, "FAIL: %s\n", what.c_str());
+}
+
+const char* cpu_name(NdsCpu cpu) { return cpu == NDS_ARM9 ? "arm9" : "arm7"; }
+
+// ── CP15 programming helpers (through the real coprocessor write path, so
+// every rebuild/publish hook the runtime actually uses is exercised) ──
+void cp15_control(uint32_t value) {
+    runtime_coproc_write(15u, 0u, 1u, 0u, 0u, value);
+}
+void cp15_cacheable(uint32_t data_bits, uint32_t instr_bits) {
+    runtime_coproc_write(15u, 0u, 2u, 0u, 0u, data_bits);
+    runtime_coproc_write(15u, 0u, 2u, 0u, 1u, instr_bits);
+}
+// ARM946E-S c6: region size is 2^(n+1) bytes; bit 0 enables.
+void cp15_region(uint32_t index, uint32_t base, uint32_t n, bool enable) {
+    runtime_coproc_write(15u, 0u, 6u, index, 0u,
+                         (base & 0xFFFFF000u) | (n << 1u) | (enable ? 1u : 0u));
+}
+// c9,c1: TCM size field is 512 << n.
+void cp15_dtcm(uint32_t base, uint32_t n) {
+    runtime_coproc_write(15u, 0u, 9u, 1u, 0u,
+                         (base & 0xFFFFF000u) | (n << 1u));
+}
+void cp15_itcm(uint32_t n) {
+    runtime_coproc_write(15u, 0u, 9u, 1u, 1u, n << 1u);
+}
+
+void clear_all_regions() {
+    for (uint32_t i = 0; i < 8u; ++i) cp15_region(i, 0u, 11u, false);
+}
+
+struct Config {
+    const char* name;
+    void (*apply)();
+    // Whether the page bitmap is EXPECTED to be usable. Checked so a future
+    // change that silently disables it everywhere (making the sweep pass
+    // vacuously by always taking the fallback) fails instead.
+    bool expect_class_ready;
+};
+
+// Control-register bit helpers.
+constexpr uint32_t kMpu = 1u << 0;
+constexpr uint32_t kDCache = 1u << 2;
+constexpr uint32_t kICache = 1u << 12;
+constexpr uint32_t kHighVec = 1u << 13;
+constexpr uint32_t kDtcmEn = 1u << 16;
+constexpr uint32_t kItcmEn = 1u << 18;
+
+void cfg_bare() {
+    clear_all_regions();
+    cp15_cacheable(0u, 0u);
+    cp15_control(kHighVec);
+}
+
+// The shape a DS game actually programs: a background no-cache region over
+// the whole space, cacheable main RAM on top, an uncacheable I/O hole, and
+// both TCMs live.
+void cfg_typical() {
+    clear_all_regions();
+    cp15_region(0, 0x00000000u, 31u, true);   // 4 GiB background
+    cp15_region(1, 0x02000000u, 21u, true);   // 4 MiB main RAM
+    cp15_region(2, 0x04000000u, 23u, true);   // 16 MiB I/O window
+    cp15_region(3, 0x06000000u, 22u, true);   // 8 MiB VRAM
+    cp15_region(4, 0x027C0000u, 13u, true);   // 16 KiB DTCM shadow
+    cp15_cacheable(0b00001010u, 0b00001010u); // regions 1 and 3 cacheable
+    cp15_itcm(6u);                            // 32 KiB ITCM at 0
+    cp15_dtcm(0x027C0000u, 5u);               // 16 KiB DTCM
+    cp15_control(kHighVec | kMpu | kDCache | kICache | kItcmEn | kDtcmEn);
+}
+
+void cfg_typical_no_dcache() {
+    cfg_typical();
+    cp15_control(kHighVec | kMpu | kICache | kItcmEn | kDtcmEn);
+}
+
+void cfg_typical_no_icache() {
+    cfg_typical();
+    cp15_control(kHighVec | kMpu | kDCache | kItcmEn | kDtcmEn);
+}
+
+// MPU off with both caches on: the walk short-circuits to the global bit,
+// so EVERY address is cacheable.
+void cfg_mpu_off_caches_on() {
+    clear_all_regions();
+    cp15_cacheable(0u, 0u);
+    cp15_itcm(6u);
+    cp15_dtcm(0x027C0000u, 5u);
+    cp15_control(kHighVec | kDCache | kICache | kItcmEn | kDtcmEn);
+}
+
+// TCM moved and oversized: the ITCM virtual span swallows the bottom of
+// main RAM, and DTCM sits in the GBA-slot window. Both are legal CP15
+// programmings and both change which branch of the model an address takes.
+void cfg_tcm_moved() {
+    clear_all_regions();
+    cp15_region(0, 0x00000000u, 31u, true);
+    cp15_region(1, 0x02000000u, 21u, true);
+    cp15_cacheable(0b00000010u, 0b00000010u);
+    cp15_itcm(15u);                           // 16 MiB virtual ITCM span
+    cp15_dtcm(0x0B000000u, 5u);
+    cp15_control(kHighVec | kMpu | kDCache | kICache | kItcmEn | kDtcmEn);
+}
+
+// TCM configured but DISABLED in the control register: the model must not
+// see either window (the mirrors carry the enable, not just the size).
+void cfg_tcm_configured_but_off() {
+    cfg_typical();
+    cp15_control(kHighVec | kMpu | kDCache | kICache);
+}
+
+// A sub-page region (2^6 = 64 bytes). The ARM946E-S forbids it, but the
+// register accepts it and a savestate can carry it, so the bitmap must
+// refuse to represent it and every consumer must fall back to the walk.
+void cfg_subpage_region() {
+    clear_all_regions();
+    cp15_region(0, 0x00000000u, 31u, true);
+    cp15_region(1, 0x02000000u, 21u, true);
+    cp15_region(2, 0x02001000u, 5u, true);    // 64 bytes
+    cp15_cacheable(0b00000110u, 0b00000010u);
+    cp15_itcm(6u);
+    cp15_dtcm(0x027C0000u, 5u);
+    cp15_control(kHighVec | kMpu | kDCache | kICache | kItcmEn | kDtcmEn);
+}
+
+const Config kConfigs[] = {
+    {"bare (reset-like: MPU off, caches off, TCM off)", cfg_bare, true},
+    {"typical game MPU + both caches + both TCM", cfg_typical, true},
+    {"typical, D-cache off", cfg_typical_no_dcache, true},
+    {"typical, I-cache off", cfg_typical_no_icache, true},
+    {"MPU off, both caches on (global bit)", cfg_mpu_off_caches_on, true},
+    {"ITCM span over main RAM, DTCM in GBA slot", cfg_tcm_moved, true},
+    {"TCM programmed but disabled in c1", cfg_tcm_configured_but_off, true},
+    {"sub-page MPU region (bitmap must refuse)", cfg_subpage_region, false},
+};
+
+// Every documented DS map boundary plus both TCM windows' edges. Probed at
+// -4..+4 and at +/- one 4 KiB page so an off-by-one page in the bitmap fill
+// or an off-by-one in a region compare cannot hide.
+std::vector<uint32_t> probe_addresses() {
+    static const uint32_t anchors[] = {
+        0x00000000u,                                    // ITCM / vector base
+        0x00001000u, 0x00004000u, 0x00008000u,          // ITCM backing edges
+        0x01000000u, 0x02000000u,                       // main RAM start
+        0x02001000u, 0x02400000u,                       // MPU sub-region edges
+        0x027C0000u, 0x027C4000u,                       // DTCM window edges
+        0x027E0000u, 0x027E0040u,                       // live-overlay watch
+        0x02400000u, 0x03000000u,                       // main RAM end
+        0x03004000u, 0x03008000u, 0x03800000u,          // WRAM splits
+        0x03810000u, 0x04000000u,                       // WRAM end / I/O
+        0x04000130u, 0x04800000u, 0x04808000u,          // I/O regs / Wi-Fi
+        0x04810000u, 0x05000000u,                       // Wi-Fi end / palette
+        0x05000400u, 0x06000000u,                       // palette end / VRAM
+        0x06800000u, 0x07000000u,                       // VRAM end / OAM
+        0x07000400u, 0x08000000u,                       // OAM end / GBA ROM
+        0x09000000u, 0x0A000000u,                       // GBA ROM / SRAM
+        0x0A010000u, 0x0B000000u,                       // GBA SRAM end
+        0x0C000000u, 0x0FFFFFFFu, 0x10000000u,          // void
+        0x80000000u, 0xFFFF0000u, 0xFFFFF000u,          // high vectors
+    };
+    std::vector<uint32_t> out;
+    for (uint32_t anchor : anchors) {
+        for (int32_t d = -4; d <= 4; ++d)
+            out.push_back(anchor + static_cast<uint32_t>(d));
+        out.push_back(anchor - 0x1000u);
+        out.push_back(anchor + 0x1000u);
+        out.push_back(anchor + 0xFFFu);
+    }
+    out.push_back(0xFFFFFFFFu);
+    out.push_back(0xFFFFFFFEu);
+    out.push_back(0xFFFFFFFCu);
+    return out;
+}
+
+void sweep_one_config(const Config& config) {
+    config.apply();
+    if (config.expect_class_ready && !g_cp15_class_ready)
+        fail(std::string("config '") + config.name +
+             "': the page cacheability bitmap disabled itself; the sweep "
+             "below would pass vacuously on the fallback");
+    if (!config.expect_class_ready && g_cp15_class_ready)
+        fail(std::string("config '") + config.name +
+             "': the bitmap claims to represent a sub-page MPU region");
+
+    const std::vector<uint32_t> addrs = probe_addresses();
+    const NdsCpu saved = g_nds_active;
+    const NdsCpu cpus[] = {NDS_ARM9, NDS_ARM7};
+    const uint32_t widths[] = {1u, 2u, 4u};
+
+    // Cacheability first: it is a strictly smaller claim than the cycle
+    // count and localizes a bitmap bug without the timing model on top.
+    for (uint32_t addr : addrs) {
+        ++g_checks;
+        if (cp15_data_cacheable(addr) != cp15_data_cacheable_reference(addr)) {
+            char buf[192];
+            std::snprintf(buf, sizeof buf,
+                          "config '%s': cp15_data_cacheable(0x%08X) = %d, "
+                          "reference walk = %d", config.name, addr,
+                          static_cast<int>(cp15_data_cacheable(addr)),
+                          static_cast<int>(cp15_data_cacheable_reference(addr)));
+            fail(buf);
+        }
+        ++g_checks;
+        if (cp15_code_cacheable(addr) != cp15_code_cacheable_reference(addr)) {
+            char buf[192];
+            std::snprintf(buf, sizeof buf,
+                          "config '%s': cp15_code_cacheable(0x%08X) = %d, "
+                          "reference walk = %d", config.name, addr,
+                          static_cast<int>(cp15_code_cacheable(addr)),
+                          static_cast<int>(cp15_code_cacheable_reference(addr)));
+            fail(buf);
+        }
+    }
+
+    for (NdsCpu cpu : cpus) {
+        g_nds_active = cpu;
+        for (uint32_t addr : addrs) {
+            for (uint32_t width : widths) {
+                for (uint32_t seq = 0; seq <= 1u; ++seq) {
+                    // The inline fast path (this TU sees the header, so this
+                    // call IS the fast path), the out-of-line fallback, and
+                    // the retained original. All three must agree.
+                    // The sentinel proves the INLINE path recorded the last
+                    // data address; the fallback would otherwise mask it.
+                    g_last_data_addr[0] = g_last_data_addr[1] = 0xDEADBEEFu;
+                    const uint32_t fast = runtime_mem_cycles(addr, width, seq);
+                    const uint32_t recorded =
+                        g_last_data_addr[cpu == NDS_ARM9 ? 0 : 1];
+                    const uint32_t slow =
+                        runtime_mem_cycles_slow(addr, width, seq);
+                    const uint32_t ref =
+                        runtime_mem_cycles_reference(addr, width, seq);
+                    ++g_checks;
+                    if (fast != ref || slow != ref) {
+                        char buf[256];
+                        std::snprintf(buf, sizeof buf,
+                            "config '%s': %s mem_cycles(0x%08X, w=%u, seq=%u) "
+                            "inline=%u fallback=%u reference=%u",
+                            config.name, cpu_name(cpu), addr, width, seq,
+                            fast, slow, ref);
+                        fail(buf);
+                    }
+                    // The last-data-address side effect is load-bearing for
+                    // arm7_cycle_combine and must survive inlining.
+                    ++g_checks;
+                    if (recorded != addr) {
+                        char buf[192];
+                        std::snprintf(buf, sizeof buf,
+                            "config '%s': %s mem_cycles(0x%08X) did not "
+                            "record g_last_data_addr", config.name,
+                            cpu_name(cpu), addr);
+                        fail(buf);
+                    }
+                }
+            }
+        }
+    }
+    g_nds_active = saved;
+}
+
+// The bitmap is rebuilt from a snapshot of its inputs. Prove the snapshot
+// cannot go stale: after a region write that CHANGES cacheability, the
+// bitmap must move; after one that does not, it must still agree.
+void check_input_tracking() {
+    cfg_typical();
+    const uint32_t probe = 0x06000000u;
+    if (!cp15_data_cacheable(probe))
+        fail("setup: expected 0x06000000 cacheable in the typical config");
+    // Turn region 3 (VRAM) non-cacheable and nothing else.
+    cp15_cacheable(0b00000010u, 0b00001010u);
+    if (cp15_data_cacheable(probe) != cp15_data_cacheable_reference(probe))
+        fail("a c2 cacheability write did not resync the page bitmap");
+    if (cp15_data_cacheable(probe))
+        fail("a c2 cacheability write left 0x06000000 cacheable");
+    // Move region 3 off the probe entirely.
+    cp15_region(3, 0x06000000u, 22u, false);
+    if (cp15_data_cacheable(probe) != cp15_data_cacheable_reference(probe))
+        fail("a c6 region-disable write did not resync the page bitmap");
+    // Re-enable and re-mark cacheable; the answer must come back.
+    cp15_region(3, 0x06000000u, 22u, true);
+    cp15_cacheable(0b00001010u, 0b00001010u);
+    if (cp15_data_cacheable(probe) != cp15_data_cacheable_reference(probe))
+        fail("re-enabling a region did not resync the page bitmap");
+    if (!cp15_data_cacheable(probe))
+        fail("re-enabling region 3 did not restore 0x06000000 cacheability");
+    // A CP15 write with no effect on cacheability must not desync anything.
+    runtime_coproc_write(15u, 0u, 5u, 0u, 0u, 0x33333333u);   // access perms
+    if (cp15_data_cacheable(probe) != cp15_data_cacheable_reference(probe))
+        fail("an unrelated CP15 write desynced the page bitmap");
+}
+
+// The g_memt_* mirrors must equal the CP15 state they mirror after every
+// path that can move TCM.
+void check_tcm_mirrors(const char* when) {
+    const uint32_t want_itcm = g_cp15.itcm_enable ? g_cp15.itcm_size : 0u;
+    const uint32_t want_dtcm = g_cp15.dtcm_enable ? g_cp15.dtcm_size : 0u;
+    if (g_memt_itcm_limit != want_itcm || g_memt_dtcm_base != g_cp15.dtcm_base ||
+        g_memt_dtcm_size != want_dtcm) {
+        char buf[256];
+        std::snprintf(buf, sizeof buf,
+            "%s: TCM timing mirrors stale (itcm %u vs %u, dtcm base %08X vs "
+            "%08X, dtcm size %u vs %u)", when, g_memt_itcm_limit, want_itcm,
+            g_memt_dtcm_base, g_cp15.dtcm_base, g_memt_dtcm_size, want_dtcm);
+        fail(buf);
+    }
+}
+
+}  // namespace
+
+namespace {
+constexpr uint32_t guard_root_pc=0x02004000u,guard_child_pc=0x02006000u;
+constexpr uint8_t guard_expected[]={0x00,0x00,0xa0,0xe1};
+const NdsStaticValidation guard_root_validation{guard_root_pc,4,guard_expected};
+const NdsStaticValidation guard_child_validation{guard_child_pc,4,guard_expected};
+unsigned guard_case=0,guard_root_calls=0,guard_child_calls=0;
+bool guard_root_yield=false,guard_child_yield=false,guard_native=false;
+template<class T> void guard_store(uint32_t address,T value) {
+    if(guard_native) {
+        auto view=NdsNativeRam::map<T>(address);
+        if(!view){fail("guard fixture expected ordinary RAM");return;}
+        view.write(address,value);
+    } else {
+        if constexpr(sizeof(T)==1)bus_write_u8(address,value);
+        else bus_write_u32(address,value);
+    }
+}
+void guard_child_body() {
+    ++g_checks;
+    if(runtime_native_store_window())fail("active nested guard allowed direct publication");
+    ++guard_child_calls;
+    guard_store<uint8_t>(guard_root_pc+0x00400000u,1);
+    guard_child_yield=runtime_should_yield();
+}
+void guard_root_body() {
+    ++g_checks;
+    if(runtime_native_store_window())fail("active guard allowed direct publication");
+    ++guard_root_calls;
+    switch(guard_case) {
+    case 0: guard_store<uint32_t>(0x02008000u,37);break;
+    case 1: guard_store<uint32_t>(guard_root_pc+128,41);break;
+    case 2: guard_store<uint8_t>(guard_root_pc+0x00400000u,1);break;
+    case 3:
+        runtime_dispatch(guard_child_pc);
+        g_cpu.R[15]=guard_root_pc+4;
+        break;
+    case 4: {
+        // An older compiled bank bumps the physical generation but publishes
+        // through the legacy addressless ABI rather than the new page API.
+        const uint32_t offset=guard_root_pc&g_busf_main.mask;
+        g_busf_main.data[offset]=1;
+        auto& generation=g_busf_main.gen[offset>>12];
+        if(++generation==0)generation=1;
+        runtime_note_code_write();
+        break;
+    }
+    }
+    guard_root_yield=runtime_should_yield();
+}
+const DispatchEntry guard_rows[]={
+    {guard_root_pc,0,guard_root_body,&guard_root_validation},
+    {guard_child_pc,0,guard_child_body,&guard_child_validation},
+};
+void check_physical_write_guards() {
+    g_nds_active=NDS_ARM9;
+    g_cpu.cpsr=0x1fu;
+    nds_register_dispatch(0,guard_rows,2,0xffff0000u);
+    for(unsigned slow=0;slow<3;++slow) {
+        guard_native=slow==2;
+        runtime_set_deep_trace(slow==1);
+        for(guard_case=0;guard_case<5;++guard_case) {
+            bus_write_u32(guard_root_pc,0xe1a00000u);
+            bus_write_u32(guard_child_pc,0xe1a00000u);
+            guard_root_calls=guard_child_calls=0;
+            guard_root_yield=guard_child_yield=false;
+            nds_slice_begin(g_runtime_cycles+1000000000ull);
+            runtime_dispatch(guard_root_pc);
+            ++g_checks;
+            if(guard_root_calls!=1||guard_child_calls!=(guard_case==3))
+                fail("physical guard fixture did not execute its registered bodies");
+            if(guard_root_yield!=(guard_case>=2)||guard_child_yield)
+                fail("physical guard lost data/content/alias/nested/legacy write contract");
+        }
+    }
+    runtime_set_deep_trace(0);
+    nds_unregister_dispatch(0,guard_rows,2);
+    std::puts("PHYSICAL_GUARDS passed: real fast/slow bus, unrelated data, same-page data, code alias, nested caller and legacy ABI");
+}
+}
+
+namespace {
+template<class T> void native_ram_case(uint32_t address) {
+    const NdsNativeRam view=NdsNativeRam::map<T>(address);
+    ++g_checks;
+    if(!view) {
+        // Unaligned/device/unmapped accesses have deliberately no direct view.
+        return;
+    }
+    ++g_checks;
+    if(view.has_provenance<T>()!=bus_range_has_write_provenance(address,sizeof(T)))
+        fail("native code provenance differs from real bus");
+    const auto slow_read=[&]() -> T {
+        if constexpr(sizeof(T)==1)return bus_read_u8_slow(address);
+        if constexpr(sizeof(T)==2)return bus_read_u16_slow(address);
+        if constexpr(sizeof(T)==4)return bus_read_u32_slow(address);
+    };
+    ++g_checks;
+    if(view.read<T>()!=slow_read())fail("native RAM mapping differs from real bus");
+    auto* bytes=view.window->data+view.offset;
+    auto* written=view.window->written+view.offset;
+    auto* generation=view.window->gen+(view.offset>>12);
+    uint8_t old_data[sizeof(T)],old_written[sizeof(T)];
+    std::memcpy(old_data,bytes,sizeof(T));
+    std::memcpy(old_written,written,sizeof(T));
+    const auto old_generation=*generation;
+    // Original provenance means nonzero, including noncanonical imported flags.
+    for(unsigned i=0;i<sizeof(T);++i)written[i]=uint8_t(2u<<i);
+    ++g_checks;
+    if(!view.has_provenance<T>()||!bus_range_has_write_provenance(address,sizeof(T)))
+        fail("native provenance narrowed valid nonzero flags");
+    for(unsigned i=0;i<sizeof(T);++i) {
+        const auto old=written[i];written[i]=0;
+        ++g_checks;
+        if(view.has_provenance<T>()||bus_range_has_write_provenance(address,sizeof(T)))
+            fail("native code admission overlooked one unwritten byte");
+        written[i]=old;
+    }
+    const T value=static_cast<T>(0x9173a5c9u);
+    *generation=UINT32_MAX;
+    view.write(address,value);
+    uint8_t candidate_data[sizeof(T)],candidate_written[sizeof(T)];
+    std::memcpy(candidate_data,bytes,sizeof(T));
+    std::memcpy(candidate_written,written,sizeof(T));
+    const auto candidate_generation=*generation;
+    std::memcpy(bytes,old_data,sizeof(T));
+    std::memcpy(written,old_written,sizeof(T));
+    *generation=UINT32_MAX;
+    if constexpr(sizeof(T)==1)bus_write_u8_slow(address,value);
+    if constexpr(sizeof(T)==2)bus_write_u16_slow(address,value);
+    if constexpr(sizeof(T)==4)bus_write_u32_slow(address,value);
+    ++g_checks;
+    if(candidate_generation!=1 || *generation!=candidate_generation ||
+       std::memcmp(candidate_data,bytes,sizeof(T)) ||
+       std::memcmp(candidate_written,written,sizeof(T)))
+        fail("native store bytes/provenance/generation differ from real bus");
+    std::memcpy(bytes,old_data,sizeof(T));
+    std::memcpy(written,old_written,sizeof(T));
+    *generation=old_generation;
+}
+void check_native_ram_transactions() {
+    bus_init();cp15_reset();runtime_set_deep_trace(0);
+    for(unsigned config=0;config<4;++config) {
+        if(config==0)cfg_bare();
+        if(config==1)cfg_typical();
+        if(config==2)cfg_tcm_moved();
+        if(config==3) {
+            cfg_typical();cp15_itcm(0);cp15_dtcm(0x02001000u,0);
+        }
+        for(g_test_wramcnt=0;g_test_wramcnt<4;++g_test_wramcnt) {
+            bus_fast_refresh();
+            for(NdsCpu cpu:{NDS_ARM9,NDS_ARM7}) {
+                g_nds_active=cpu;
+                ++g_checks;
+                if(!NdsNativeRam::map<uint32_t>(0x02008000u) ||
+                   NdsNativeRam::map<uint32_t>(0x04000130u) ||
+                   NdsNativeRam::map<uint32_t>(0x02008002u))
+                    fail("native RAM expected coverage/device/unaligned admission");
+                auto addresses=probe_addresses();
+                for(auto edge:{0x00000200u,0x02001200u})
+                    for(int d=-4;d<=4;++d)addresses.push_back(edge+d);
+                for(uint32_t address:addresses) {
+                    native_ram_case<uint8_t>(address);
+                    native_ram_case<uint16_t>(address);
+                    native_ram_case<uint32_t>(address);
+                }
+            }
+        }
+    }
+    g_test_wramcnt=0;bus_fast_refresh();
+    g_nds_active=NDS_ARM9;cfg_typical();
+    NdsCp15SaveState snapshot{};cp15_savestate_export(&snapshot);
+    cfg_tcm_moved();cp15_savestate_import(snapshot,nullptr);
+    native_ram_case<uint32_t>(0x027c0000u);
+    native_ram_case<uint32_t>(0x02400000u);
+    // Imported CP15 state is accepted verbatim. A subpage DTCM window can
+    // leave both page endpoints in MainRAM while changing its interior.
+    cp15_savestate_export(&snapshot);
+    snapshot.visible.dtcm_base=0x02008100u;snapshot.visible.dtcm_size=512;
+    cp15_savestate_import(snapshot,nullptr);g_nds_active=NDS_ARM9;
+    uint32_t lo=0,hi=0;
+    const auto* first=nds_busf_classify(0x02008000u,&lo);
+    const auto* last=nds_busf_classify(0x02008fffu,&hi);
+    ++g_checks;
+    if(first!=last||!first||hi!=lo+4095u||NdsNativeRam::page(0x02008000u)||
+       NdsNativeRam::map<uint32_t>(0x02008100u).window!=&g_busf_dtcm)
+        fail("shared page qualification missed an interior imported TCM window");
+    g_nds_active=NDS_ARM7;++g_checks;
+    if(!NdsNativeRam::page(0x02008000u))fail("ARM9 TCM incorrectly changed ARM7 page mapping");
+    cp15_reset();
+    check_physical_write_guards();
+    std::printf("native_ram_transactions: %lld checks, %d failure(s)\n",g_checks,g_failures);
+}
+void check_native_store_pages() {
+    struct Page {uint8_t* data;uint8_t* written;uint32_t* generation;};
+    NdsNativeStorePages<Page> tables[2];
+    std::unordered_set<const uint32_t*> protected_pages;
+    bus_init();cp15_reset();runtime_set_deep_trace(0);
+    for(unsigned config=0;config<4;++config) {
+        if(config==0)cfg_bare();
+        if(config==1)cfg_typical();
+        if(config==2)cfg_tcm_moved();
+        if(config==3){cfg_typical();cp15_itcm(0);cp15_dtcm(0x02001000u,0);}
+        for(g_test_wramcnt=0;g_test_wramcnt<4;++g_test_wramcnt) {
+            bus_fast_refresh();
+            for(NdsCpu cpu:{NDS_ARM9,NDS_ARM7}) {
+                g_nds_active=cpu;protected_pages.clear();
+                auto& table=tables[cpu];table.refresh(protected_pages);
+                ++g_checks;
+                if(!table.at(0x02008000u)||table.at(0x04000130u)||table.at(0x027e0010u))
+                    fail("store plan lost ordinary/device/observer admission");
+                for(uint32_t address:probe_addresses()) {
+                    if(auto* page=table.at(address)) {
+                        const auto view=NdsNativeRam::map<uint8_t>(address);
+                        ++g_checks;
+                        if(!view||page->data+(address&4095u)!=view.window->data+view.offset||
+                           page->written+(address&4095u)!=view.window->written+view.offset||
+                           page->generation!=view.generation())
+                            fail("store plan bytes/provenance/generation disagree with real mapping");
+                    }
+                }
+                const auto view=NdsNativeRam::map<uint32_t>(0x02008000u);
+                protected_pages.insert(view.generation());
+                table.protect(view.generation());
+                ++g_checks;
+                if(table.at(0x02008000u)||table.at(0x02408000u))
+                    fail("store plan failed to exclude a code page through its alias");
+                table.refresh(protected_pages);
+                ++g_checks;
+                if(table.at(0x02008000u)||table.at(0x02408000u))
+                    fail("store plan mapping refresh forgot protected physical identity");
+            }
+            // Both CPU plans retain their own map while sharing protection.
+            const auto* generation=NdsNativeRam::map<uint32_t>(0x02009000u).generation();
+            for(auto& table:tables)table.protect(generation);
+            ++g_checks;
+            if(tables[0].at(0x02009000u)||tables[1].at(0x02409000u))
+                fail("store plan protection did not reach both CPU aliases");
+        }
+    }
+    runtime_set_deep_trace(1);++g_checks;
+    if(runtime_native_store_window())fail("tracing allowed direct publication");
+    runtime_set_deep_trace(0);++g_checks;
+    if(!runtime_native_store_window())fail("unobserved store window unavailable");
+    cp15_reset();check_physical_write_guards();
+    std::printf("native_store_pages: %lld checks, %d failure(s)\n",g_checks,g_failures);
+}
+}
+int main(int argc,char** argv) {
+    if(argc==2 && std::strcmp(argv[1],"--native-store-pages-only")==0) {
+        check_native_store_pages();return g_failures?1:0;
+    }
+    if(argc==2 && std::strcmp(argv[1],"--native-ram-only")==0) {
+        check_native_ram_transactions();return g_failures?1:0;
+    }
+
+    // No nds_io_reset(): io.cpp is stubbed in this link (see
+    // savestate_test_stubs.cpp). The GBA-slot / Wi-Fi timings that read live
+    // I/O registers therefore see the stubs' constant values -- which is
+    // fine, because all three implementations under test read the SAME
+    // stubs, and those addresses take the shared out-of-line path anyway.
+    bus_init();
+    cp15_reset();
+    check_tcm_mirrors("after cp15_reset");
+
+    for (const Config& config : kConfigs) {
+        std::fprintf(stderr, "[sweep] %s\n", config.name);
+        sweep_one_config(config);
+        check_tcm_mirrors(config.name);
+    }
+
+    check_input_tracking();
+
+    // cp15_reset must put the derived state back, not leave the last
+    // config's bitmap behind.
+    cfg_typical();
+    cp15_reset();
+    check_tcm_mirrors("after cp15_reset following a live config");
+    for (uint32_t addr : probe_addresses()) {
+        ++g_checks;
+        if (cp15_data_cacheable(addr) != cp15_data_cacheable_reference(addr))
+            fail("cp15_reset left a stale cacheability bitmap");
+    }
+    // And bus_init (which republishes the mirrors) must agree too.
+    bus_init();
+    check_tcm_mirrors("after bus_init");
+
+    check_physical_write_guards();
+
+    std::printf("mem_timing_test: %lld checks, %d failure(s)\n",
+                g_checks, g_failures);
+    if (g_failures) {
+        std::printf("mem_timing_test: FAILED\n");
+        return 1;
+    }
+    std::printf("mem_timing_test: OK\n");
+    return 0;
+}

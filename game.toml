@@ -1,0 +1,21 @@
+[game]
+sha1 = "20a16088f0f1b67a11dd93a5a1976a702f8eaef7"
+
+[system]
+# The real retail BIOS/firmware launches Slot-1 in Automatic mode.
+startup_mode = "automatic"
+
+[display]
+title = "Devil Survivor"
+window_scale = 2
+screen_layout = "stacked"
+adaptive_widescreen = "none"
+
+[controls]
+keyboard_layout = "wasd"
+
+[cartridge]
+# melonDS 1.0rc ROMList: CVIE / 0x45495643, SaveMemType 2.
+# NDSCart.cpp maps type 2 to regular EEPROM, 8192 bytes.
+save_type = "eeprom"
+save_size = 8192

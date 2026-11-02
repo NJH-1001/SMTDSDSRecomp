@@ -1,0 +1,599 @@
+// GPL-3.0-or-later; see ComputeHost.h and THIRD_PARTY_ATTRIBUTION.md.
+#include "ComputeHost.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+#define SDL_MAIN_HANDLED
+#if defined(NDS_HAVE_SDL3)
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>
+#else
+#include <SDL.h>
+#endif
+
+#include "glad/glad.h"
+#include "gpu2d.h"
+#include "gpu3d.h"
+#include "TextureUpscale.h"
+#include "PresentShaders.h"
+
+namespace
+{
+SDL_Window* g_window = nullptr;
+SDL_GLContext g_context = nullptr;
+bool g_owns_video = false;
+bool g_owns_window = false;
+bool g_active = false;
+bool g_visible = false;
+GLuint g_present_program = 0;
+GLuint g_present_vao = 0;
+GLuint g_fallback_texture[2] = {};
+GLuint g_object_texture[2] = {};
+GLuint g_raster_texture[2] = {};
+GLuint g_hd_top_texture[2] = {};
+GLuint g_hd_below_texture[2] = {};
+int g_texture_width = 0;
+unsigned g_present_buffer = 0;
+
+// GL identity, captured once the context is current. Fixed buffers rather
+// than std::string: this is read from the diagnostics sampler, and the
+// pointers must stay valid without imposing an allocation or a lifetime
+// question on a periodic reader.
+char g_gl_renderer[192] = {};
+char g_gl_vendor[192] = {};
+char g_gl_version[192] = {};
+
+void copy_gl_string(char* dst, std::size_t cap, GLenum name)
+{
+    const char* src = reinterpret_cast<const char*>(glGetString(name));
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
+    std::snprintf(dst, cap, "%s", src);
+}
+
+void capture_gl_identity()
+{
+    copy_gl_string(g_gl_renderer, sizeof(g_gl_renderer), GL_RENDERER);
+    copy_gl_string(g_gl_vendor, sizeof(g_gl_vendor), GL_VENDOR);
+    copy_gl_string(g_gl_version, sizeof(g_gl_version), GL_VERSION);
+}
+
+#if defined(NDS_HAVE_SDL3)
+bool sdl_ok(bool result)
+{
+    return result;
+}
+#else
+bool sdl_ok(int result)
+{
+    return result == 0;
+}
+#endif
+
+SDL_Window* create_gl_window(const char* title, int width, int height,
+                             uint64_t flags)
+{
+#if defined(NDS_HAVE_SDL3)
+    return SDL_CreateWindow(title, width, height,
+                            static_cast<SDL_WindowFlags>(flags));
+#else
+    return SDL_CreateWindow(title, SDL_WINDOWPOS_UNDEFINED,
+                            SDL_WINDOWPOS_UNDEFINED, width, height,
+                            static_cast<uint32_t>(flags));
+#endif
+}
+
+bool sdl_init_video()
+{
+#if defined(NDS_HAVE_SDL3)
+    return SDL_InitSubSystem(SDL_INIT_VIDEO);
+#else
+    return SDL_InitSubSystem(SDL_INIT_VIDEO) == 0;
+#endif
+}
+
+bool sdl_make_current(SDL_Window* window, SDL_GLContext context)
+{
+    return sdl_ok(SDL_GL_MakeCurrent(window, context));
+}
+
+void sdl_destroy_context(SDL_GLContext context)
+{
+#if defined(NDS_HAVE_SDL3)
+    SDL_GL_DestroyContext(context);
+#else
+    SDL_GL_DeleteContext(context);
+#endif
+}
+
+void sdl_get_drawable_size(SDL_Window* window, int* width, int* height)
+{
+#if defined(NDS_HAVE_SDL3)
+    SDL_GetWindowSizeInPixels(window, width, height);
+#else
+    SDL_GL_GetDrawableSize(window, width, height);
+#endif
+}
+
+struct PresentViewport {
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+};
+
+PresentViewport fit_present_viewport(int drawable_width, int drawable_height,
+                                     int content_width, int content_height)
+{
+    PresentViewport viewport{};
+    if (drawable_width <= 0 || drawable_height <= 0 ||
+        content_width <= 0 || content_height <= 0) {
+        return viewport;
+    }
+
+    viewport.width = drawable_width;
+    viewport.height = static_cast<int>(
+        static_cast<long long>(drawable_width) * content_height /
+        content_width);
+    if (viewport.height > drawable_height) {
+        viewport.height = drawable_height;
+        viewport.width = static_cast<int>(
+            static_cast<long long>(drawable_height) * content_width /
+            content_height);
+    }
+    if (viewport.width < 1) viewport.width = 1;
+    if (viewport.height < 1) viewport.height = 1;
+    viewport.x = (drawable_width - viewport.width) / 2;
+    viewport.y = (drawable_height - viewport.height) / 2;
+    return viewport;
+}
+
+using nds_compute_present::kPresentVertex;
+using nds_compute_present::kPresentFragment;
+
+GLuint compile_shader(GLenum type, const char* source)
+{
+    GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &source, nullptr);
+    glCompileShader(shader);
+    GLint ok = GL_FALSE;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+    if (ok == GL_TRUE) return shader;
+    char log[2048] = {};
+    glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
+    std::fprintf(stderr, "[gpu3d] direct-present shader failed: %s\n", log);
+    glDeleteShader(shader);
+    return 0;
+}
+
+bool start_presenter()
+{
+    GLuint vertex = compile_shader(GL_VERTEX_SHADER, kPresentVertex);
+    GLuint fragment = compile_shader(GL_FRAGMENT_SHADER, kPresentFragment);
+    if (!vertex || !fragment) {
+        if (vertex) glDeleteShader(vertex);
+        if (fragment) glDeleteShader(fragment);
+        return false;
+    }
+    g_present_program = glCreateProgram();
+    glAttachShader(g_present_program, vertex);
+    glAttachShader(g_present_program, fragment);
+    glLinkProgram(g_present_program);
+    glDeleteShader(vertex);
+    glDeleteShader(fragment);
+    GLint ok = GL_FALSE;
+    glGetProgramiv(g_present_program, GL_LINK_STATUS, &ok);
+    if (ok != GL_TRUE) {
+        char log[2048] = {};
+        glGetProgramInfoLog(g_present_program, sizeof(log), nullptr, log);
+        std::fprintf(stderr, "[gpu3d] direct-present link failed: %s\n", log);
+        return false;
+    }
+    glGenVertexArrays(1, &g_present_vao);
+    glGenTextures(2, g_fallback_texture);
+    glGenTextures(2, g_object_texture);
+    glGenTextures(2, g_raster_texture);
+    glGenTextures(2, g_hd_top_texture);
+    glGenTextures(2, g_hd_below_texture);
+    return true;
+}
+
+void stop_presenter()
+{
+    glDeleteTextures(2, g_hd_below_texture);
+    glDeleteTextures(2, g_hd_top_texture);
+    glDeleteTextures(2, g_object_texture);
+    glDeleteTextures(2, g_raster_texture);
+    glDeleteTextures(2, g_fallback_texture);
+    if (g_present_vao) glDeleteVertexArrays(1, &g_present_vao);
+    if (g_present_program) glDeleteProgram(g_present_program);
+    g_object_texture[0] = g_object_texture[1] = 0;
+    g_raster_texture[0] = g_raster_texture[1] = 0;
+    g_fallback_texture[0] = g_fallback_texture[1] = 0;
+    g_hd_top_texture[0] = g_hd_top_texture[1] = 0;
+    g_hd_below_texture[0] = g_hd_below_texture[1] = 0;
+    g_present_vao = 0;
+    g_present_program = 0;
+    g_texture_width = 0;
+    g_present_buffer = 0;
+}
+
+void configure_integer_texture(GLuint texture, int width)
+{
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8UI, width, 192, 0,
+                 GL_RGBA_INTEGER, GL_UNSIGNED_BYTE, nullptr);
+}
+
+// The HD layer surfaces carry a 24-bit colour plus a packed 32-bit key, so
+// they need a wider integer format than the RGBA8UI OBJ surface.
+void configure_layer_texture(GLuint texture, int width)
+{
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32UI, width, 192, 0,
+                 GL_RG_INTEGER, GL_UNSIGNED_INT, nullptr);
+}
+
+void release_host_objects()
+{
+    if (g_context && g_window) {
+        sdl_make_current(g_window, g_context);
+        stop_presenter();
+    }
+    if (g_context) nds_texture_upscale_shutdown();
+    if (g_context) sdl_destroy_context(g_context);
+    if (g_window && g_owns_window) SDL_DestroyWindow(g_window);
+    if (g_owns_video) SDL_QuitSubSystem(SDL_INIT_VIDEO);
+    g_window = nullptr;
+    g_context = nullptr;
+    g_owns_video = false;
+    g_owns_window = false;
+    g_active = false;
+    g_visible = false;
+}
+}
+
+bool nds_compute_host_start(SDL_Window* presentation_window)
+{
+    const NdsGpu3dRendererPolicy policy = nds_gpu3d_renderer_policy();
+    if (policy == NdsGpu3dRendererPolicy::Soft) return true;
+    if (g_active) return true;
+    const bool required = policy == NdsGpu3dRendererPolicy::Compute;
+    auto fail_or_fallback = [&](const char* reason) {
+        nds_gpu3d_restore_soft_renderer();
+        release_host_objects();
+        if (required) return false;
+        std::fprintf(stderr,
+            "[gpu3d] OpenGL auto-selection failed (%s); "
+            "using threaded software\n", reason);
+        return true;
+    };
+
+    SDL_SetMainReady();
+    g_owns_video = (SDL_WasInit(SDL_INIT_VIDEO) == 0);
+    if (g_owns_video && !sdl_init_video()) {
+        std::fprintf(stderr, "[gpu3d] SDL video init failed: %s\n",
+                     SDL_GetError());
+        return fail_or_fallback("SDL video initialization");
+    }
+
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
+                        SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, presentation_window ? 1 : 0);
+    g_window = presentation_window;
+    g_visible = presentation_window != nullptr;
+    if (!g_window) {
+        g_window = create_gl_window(
+            "ndsrecomp compute context", 1, 1,
+            SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
+        g_owns_window = true;
+        if (!g_window) {
+            std::fprintf(stderr, "[gpu3d] compute GL window failed: %s\n",
+                         SDL_GetError());
+            SDL_GL_ResetAttributes();
+            return fail_or_fallback("OpenGL window creation");
+        }
+    }
+    g_context = SDL_GL_CreateContext(g_window);
+    SDL_GL_ResetAttributes();
+    if (!g_context || !sdl_make_current(g_window, g_context)) {
+        std::fprintf(stderr, "[gpu3d] compute GL 4.3 context failed: %s\n",
+                     SDL_GetError());
+        return fail_or_fallback("OpenGL 4.3 context creation");
+    }
+    if (!gladLoadGLLoader(
+            reinterpret_cast<GLADloadproc>(SDL_GL_GetProcAddress)) ||
+        !GLAD_GL_VERSION_4_3) {
+        std::fprintf(stderr, "[gpu3d] OpenGL 4.3 unavailable\n");
+        return fail_or_fallback("OpenGL 4.3 unavailable");
+    }
+    capture_gl_identity();
+    std::fprintf(stderr, "[gpu3d] OpenGL %s / %s\n",
+                 nds_compute_host_gl_version(),
+                 nds_compute_host_gl_renderer());
+    // Must precede the renderer: the factor sizes every texture-array
+    // allocation and the cache's free-list is derived from it. A failure here
+    // resets the factor to 1 rather than aborting, so the renderer still
+    // starts with native textures.
+    nds_texture_upscale_init();
+    if (!nds_gpu3d_use_compute_renderer()) {
+        std::fprintf(stderr, "[gpu3d] compute renderer init failed\n");
+        return fail_or_fallback("compute renderer initialization");
+    }
+    if (g_visible && !start_presenter()) {
+        std::fprintf(stderr, "[gpu3d] direct presenter init failed\n");
+        return fail_or_fallback("direct presenter initialization");
+    }
+    if (g_visible) SDL_GL_SetSwapInterval(0);
+    g_active = true;
+    std::fprintf(stderr, "[gpu3d] renderer: %s\n",
+                 nds_gpu3d_compiled_accelerated_backend());
+    return true;
+}
+
+bool nds_compute_host_make_current()
+{
+    return !g_active || sdl_make_current(g_window, g_context);
+}
+
+bool nds_compute_host_has_visible_context()
+{
+    return g_active && g_visible;
+}
+
+bool nds_compute_host_read_presented(std::vector<uint32_t>& pixels,
+                                      unsigned& width, unsigned& height)
+{
+    width = height = 0;
+    if (!g_active || !g_visible || !g_texture_width ||
+        !sdl_make_current(g_window, g_context)) return false;
+    int dw = 0, dh = 0;
+    sdl_get_drawable_size(g_window, &dw, &dh);
+    const auto v = fit_present_viewport(dw, dh, g_texture_width, 192);
+    if (dw <= 0 || dh <= 0 || uint64_t(v.width) * v.height > 16000000u)
+        return false;
+    GLint old_fbo, old_pack, old_alignment, old_length, old_rows, old_pixels;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &old_fbo);
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &old_pack);
+    glGetIntegerv(GL_PACK_ALIGNMENT, &old_alignment);
+    glGetIntegerv(GL_PACK_ROW_LENGTH, &old_length);
+    glGetIntegerv(GL_PACK_SKIP_ROWS, &old_rows);
+    glGetIntegerv(GL_PACK_SKIP_PIXELS, &old_pixels);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    GLint old_read_buffer;
+    glGetIntegerv(GL_READ_BUFFER, &old_read_buffer);
+    glReadBuffer(GL_FRONT);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+    std::vector<uint32_t> rgba(size_t(v.width) * v.height);
+    glReadPixels(v.x, v.y, v.width, v.height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    const GLenum error = glGetError();
+    glReadBuffer(old_read_buffer);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(old_fbo));
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(old_pack));
+    glPixelStorei(GL_PACK_ALIGNMENT, old_alignment);
+    glPixelStorei(GL_PACK_ROW_LENGTH, old_length);
+    glPixelStorei(GL_PACK_SKIP_ROWS, old_rows);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, old_pixels);
+    if (error != GL_NO_ERROR) return false;
+    pixels.resize(rgba.size());
+    for (int y = 0; y < v.height; ++y) for (int x = 0; x < v.width; ++x) {
+        const uint32_t p = rgba[size_t(v.height - 1 - y) * v.width + x];
+        pixels[size_t(y) * v.width + x] = 0xFF000000u | ((p & 255u) << 16) |
+            (p & 0xFF00u) | ((p >> 16) & 255u);
+    }
+    width = static_cast<unsigned>(v.width);
+    height = static_cast<unsigned>(v.height);
+    return true;
+}
+
+bool nds_compute_host_present_top(const unsigned int* fallback_pixels,
+                                  unsigned short fallback_width,
+                                  const NdsGpu2dDirectFrame* direct_frame,
+                                  NdsComputePresentTicks* ticks,
+                                  unsigned antialiasing,
+                                  const NdsComputePresentationFrame* owned)
+{
+    if (!g_active || !g_visible || !g_present_program || !ticks)
+        return false;
+    const auto diagnostic_begin = ticks->diagnostic ? SDL_GetPerformanceCounter() : 0;
+    if (!sdl_make_current(g_window, g_context)) return false;
+    const int width = direct_frame ? direct_frame->width : fallback_width;
+    if (width <= 0 || width > 448) return false;
+    if (g_texture_width != width) {
+        for (int i = 0; i < 2; ++i) {
+            configure_integer_texture(g_fallback_texture[i], width);
+            configure_integer_texture(g_object_texture[i], width);
+            glBindTexture(GL_TEXTURE_2D, g_raster_texture[i]);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32UI, 1, 192, 0,
+                         GL_RGBA_INTEGER, GL_UNSIGNED_INT, nullptr);
+            configure_layer_texture(g_hd_top_texture[i], width);
+            configure_layer_texture(g_hd_below_texture[i], width);
+        }
+        g_texture_width = width;
+    }
+    const unsigned buffer = g_present_buffer;
+    g_present_buffer ^= 1u;
+
+    // HD outranks the OBJ-only direct path: it covers the same scenes plus
+    // every one carrying BG layers, and it is the only path that can consume
+    // the high-resolution 3D surface. It stands down whenever the compositor
+    // did not emit surfaces for this frame (native width, engine B on top,
+    // unsupported scene, or skybox repair).
+    NdsGpu2dHdFrame hd{};
+    const auto hires_texture=owned ? owned->hires_texture : nds_gpu3d_compute_output_texture_hires();
+    const auto native_texture=owned ? owned->native_texture : nds_gpu3d_compute_output_texture();
+    const auto scale=hires_texture ? (owned ? owned->scale : nds_gpu3d_internal_scale()) : 1u;
+    const bool hd_active =
+        hires_texture != 0u && (owned ? (hd=owned->hd,owned->has_hd) : nds_gpu2d_hd_frame(&hd)) &&
+        hd.width == width && hd.top_pixels && hd.below_pixels;
+    if (owned && hd_active) nds_gpu2d_note_owned_hd_presented();
+
+    unsigned long long start = SDL_GetPerformanceCounter();
+    if (ticks->diagnostic) ticks->setup = start - diagnostic_begin;
+    if (hd_active) {
+        glActiveTexture(GL_TEXTURE4);
+        glBindTexture(GL_TEXTURE_2D, g_hd_top_texture[buffer]);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, 192,
+                        GL_RG_INTEGER, GL_UNSIGNED_INT, hd.top_pixels);
+        glActiveTexture(GL_TEXTURE5);
+        glBindTexture(GL_TEXTURE_2D, g_hd_below_texture[buffer]);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, 192,
+                        GL_RG_INTEGER, GL_UNSIGNED_INT, hd.below_pixels);
+        glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
+    } else if (direct_frame) {
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, g_object_texture[buffer]);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, 192,
+                        GL_RGBA_INTEGER, GL_UNSIGNED_BYTE,
+                        direct_frame->object_pixels);
+        if (direct_frame->raster_params) {
+            glActiveTexture(GL_TEXTURE6);
+            glBindTexture(GL_TEXTURE_2D, g_raster_texture[buffer]);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 192,
+                GL_RGBA_INTEGER, GL_UNSIGNED_INT, direct_frame->raster_params);
+        }
+        glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
+    } else {
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, g_fallback_texture[buffer]);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, 192,
+                        GL_BGRA_INTEGER, GL_UNSIGNED_BYTE, fallback_pixels);
+    }
+    ticks->upload += SDL_GetPerformanceCounter() - start;
+
+    start = SDL_GetPerformanceCounter();
+    int drawable_width = 0;
+    int drawable_height = 0;
+    sdl_get_drawable_size(g_window, &drawable_width, &drawable_height);
+    const PresentViewport viewport =
+        fit_present_viewport(drawable_width, drawable_height, width, 192);
+    glClearColor(0.f, 0.f, 0.f, 1.f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
+    glUseProgram(g_present_program);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, g_object_texture[buffer]);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, g_fallback_texture[buffer]);
+    glUniform1ui(0, direct_frame ? 1u : 0u);
+    glUniform1ui(1, static_cast<GLuint>(width));
+    glUniform1ui(11, hd_active ? 1u : 0u);
+    glUniform1ui(13, direct_frame && direct_frame->raster_params && !hd_active ? 1u : 0u);
+    glUniform1ui(14, antialiasing);
+    if (hd_active) {
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_2D, hires_texture);
+        glActiveTexture(GL_TEXTURE4);
+        glBindTexture(GL_TEXTURE_2D, g_hd_top_texture[buffer]);
+        glActiveTexture(GL_TEXTURE5);
+        glBindTexture(GL_TEXTURE_2D, g_hd_below_texture[buffer]);
+        glUniform1ui(10, scale);
+        glUniform1ui(12, hd.order_3d);
+        glUniform1ui(2, hd.render_xpos);
+        glUniform1ui(4, hd.bldcnt);
+        glUniform1ui(5, hd.eva);
+        glUniform1ui(6, hd.evb);
+        glUniform1ui(7, hd.evy);
+        glUniform1ui(8, hd.master_bright);
+        glUniform1ui(9, hd.priority_3d);
+        glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
+    } else if (direct_frame) {
+        // Sample the high-resolution surface only when one actually exists;
+        // the accessor returns zero at scale 1 or under the soft renderer, in
+        // which case the presenter stays on the native integer path.
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, native_texture);
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_2D, hires_texture);
+        glUniform1ui(10, static_cast<GLuint>(scale));
+        glUniform1ui(2, direct_frame->render_xpos);
+        glUniform3ui(3,
+            direct_frame->backdrop_color & 0x3Fu,
+            (direct_frame->backdrop_color >> 8) & 0x3Fu,
+            (direct_frame->backdrop_color >> 16) & 0x3Fu);
+        glUniform1ui(4, direct_frame->bldcnt);
+        glUniform1ui(5, direct_frame->eva);
+        glUniform1ui(6, direct_frame->evb);
+        glUniform1ui(7, direct_frame->evy);
+        glUniform1ui(8, direct_frame->master_bright);
+        glUniform1ui(9, direct_frame->priority_3d);
+        glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
+    }
+    glBindVertexArray(g_present_vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    ticks->draw += SDL_GetPerformanceCounter() - start;
+
+    // Keep the qualified per-frame GL checks. A window-system swap failure
+    // is reported separately by SDL3 rather than through glGetError.
+    start = SDL_GetPerformanceCounter();
+#if defined(NDS_HAVE_SDL3)
+    const bool swapped = SDL_GL_SwapWindow(g_window);
+#else
+    SDL_GL_SwapWindow(g_window);
+    const bool swapped = true;
+#endif
+    ticks->swap += SDL_GetPerformanceCounter() - start;
+    if (!swapped) return false;
+    const auto diagnostic_error = ticks->diagnostic ? SDL_GetPerformanceCounter() : 0;
+    const bool ok = glGetError() == GL_NO_ERROR;
+    if (ticks->diagnostic)
+        ticks->error = SDL_GetPerformanceCounter() - diagnostic_error;
+    return ok;
+}
+
+void nds_compute_host_stop()
+{
+    if (!g_active) {
+        release_host_objects();
+        return;
+    }
+    sdl_make_current(g_window, g_context);
+    nds_gpu3d_restore_soft_renderer();
+    release_host_objects();
+}
+
+bool nds_compute_host_active()
+{
+    return g_active;
+}
+
+NdsGlProc nds_compute_host_gl_proc(const char* name)
+{
+    if (!g_context || !name || !*name) return nullptr;
+    return reinterpret_cast<NdsGlProc>(SDL_GL_GetProcAddress(name));
+}
+
+const char* nds_compute_host_gl_renderer()
+{
+    return g_gl_renderer;
+}
+
+const char* nds_compute_host_gl_vendor()
+{
+    return g_gl_vendor;
+}
+
+const char* nds_compute_host_gl_version()
+{
+    return g_gl_version;
+}

@@ -1,0 +1,91 @@
+#include "hle_mkds.h"
+#include "hle_vector_math.h"
+#include "state.h"
+#include "sha1.h"
+#if defined(NDS_MKDS_PIO_HLE)
+#include "hle_mkds_card_pio.h"
+#endif
+#if defined(NDS_MKDS_STREAM_HLE)
+#include "hle_mkds_stream.h"
+#endif
+
+#include <array>
+#include <cstring>
+
+namespace mkds_hle {
+namespace {
+Statistics counts;
+struct Binding {
+    uint32_t entry, start, size;
+    const char* sha1;
+    Function function;
+    std::array<uint8_t, 544> bytes{};
+    NdsStaticValidation validation{};
+};
+// ROM hashes only; the proof bytes are read from the verified resident image.
+Binding bindings[] = {
+#define NDS_MKDS_VECTOR_ENTRY(entry, size, hash, function) {entry, entry, size, hash, function},
+#include "mkds_vector_entries.inc"
+#undef NDS_MKDS_VECTOR_ENTRY
+};
+} // namespace
+
+bool initialize(const char* rom_sha1) {
+    counts = {};
+    counts.group_mask = 1; // vector/affine kernels; no hardware math or submit replacement
+#if defined(NDS_MKDS_STREAM_HLE)
+    counts.group_mask |= 8;
+    mkds_stream::reset();
+#endif
+#if defined(NDS_MKDS_PIO_HLE)
+    counts.group_mask |= 16;
+    mkds_card_pio::initialize(rom_sha1);
+#endif
+    counts.rom_supported = rom_sha1 &&
+        std::strcmp(rom_sha1, "691e00d9a5dd80b04f80cc7559503e8b06848785") == 0;
+    return counts.rom_supported;
+}
+Statistics statistics() { return counts; }
+
+bool is_entry(NdsCpu cpu, uint32_t pc, bool thumb) {
+    if (!counts.rom_supported || cpu != NDS_ARM9 || thumb) return false;
+#if defined(NDS_MKDS_STREAM_HLE)
+    if (mkds_stream::is_entry(pc)) return true;
+#endif
+#if defined(NDS_MKDS_PIO_HLE)
+    if (mkds_card_pio::is_entry(pc)) return true;
+#endif
+    for (const auto& binding : bindings) if (binding.function && binding.entry == pc) return true;
+    return false;
+}
+
+Replacement resolve(NdsCpu cpu, uint32_t pc, bool thumb) {
+    if (!counts.rom_supported || cpu != NDS_ARM9 || thumb) return {};
+#if defined(NDS_MKDS_STREAM_HLE)
+    if (mkds_stream::is_entry(pc)) return mkds_stream::resolve(pc);
+#endif
+#if defined(NDS_MKDS_PIO_HLE)
+    if (mkds_card_pio::is_entry(pc)) return mkds_card_pio::resolve(pc);
+#endif
+    for (auto& b : bindings) {
+        if (!b.function || pc != b.entry) continue;
+        std::array<uint8_t, 544> live{};
+        if (!bus_range_has_write_provenance(b.start, b.size) ||
+            !bus_debug_copy(0, b.start, live.data(), b.size) ||
+            gba::sha1(live.data(), b.size).hex() != b.sha1)
+            return {nullptr, nullptr, b.start, b.size};
+        // Successful revalidation always copies the same fingerprinted bytes.
+        // Their stable address may be retained by dispatch/link/active guards.
+        b.bytes = live;
+        b.validation = {b.start, b.size, b.bytes.data(), nullptr, 0};
+        return {b.function, &b.validation, b.start, b.size};
+    }
+    return {};
+}
+
+void scale_add() { ++counts.scale_add; nds_hle::scale_add(); }
+void cross_product() { ++counts.cross_product; nds_hle::cross_product(); }
+void transform_translate() { ++counts.transform_translate; nds_hle::transform_translate(); }
+void matrix_concat() { ++counts.matrix_concat; nds_hle::matrix_concat(); }
+
+} // namespace mkds_hle

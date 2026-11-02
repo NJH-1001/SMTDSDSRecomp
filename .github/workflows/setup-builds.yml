@@ -1,0 +1,79 @@
+name: ROM-free native setup builds
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    # Native compiler/linker and package checks only. No ROMs, retail dumps,
+    # private captures, generated commercial code, or gameplay benchmarks.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            platform: Windows-x86_64
+          - os: ubuntu-24.04
+            platform: Linux-x86_64
+          - os: macos-15-intel
+            platform: macOS-x86_64
+          - os: macos-15
+            platform: macOS-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build tools
+        run: python -m pip install cmake ninja
+      - name: Linux display/audio development headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libpulse-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev libwayland-dev libxkbcommon-dev libegl1-mesa-dev
+      - name: Configure Windows compiler environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Select Clang on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "CC=clang" >> $env:GITHUB_ENV
+          "CXX=clang++" >> $env:GITHUB_ENV
+      - name: Audit source before generating any build artifacts
+        run: python tools/package_release.py --source .
+      - name: Build original setup host
+        run: |
+          cmake -S setup -B build-setup -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-setup
+      - name: Test setup host
+        shell: bash
+        run: ./build-setup/SMTDSDSRecomp-Setup --version
+      - name: Build pinned SDL3 SDK
+        run: python tools/bootstrap_sdl.py build-sdk
+      - name: Compile native player against original synthetic inputs
+        run: python tools/ci_compile.py --work build-synthetic --prefix build-sdk/prefix
+      - name: Package audited source plus setup host only
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, shutil
+          from pathlib import Path
+          # Reconstruct pristine manifest-listed source after CI's temporary
+          # dependency/build writes. None of those outputs enter this stage.
+          manifest=json.loads(Path('SOURCE_MANIFEST.json').read_text())
+          root=Path('build-public-source');root.mkdir()
+          for name in [*manifest['files'],'SOURCE_MANIFEST.json']:
+              dst=root/name;dst.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(name,dst)
+          PY
+          suffix=""; if [ "${{ runner.os }}" = "Windows" ]; then suffix=".exe"; fi
+          python tools/package_release.py --source build-public-source --setup "build-setup/SMTDSDSRecomp-Setup${suffix}" --platform "${{ matrix.platform }}" --output "dist/SMTDSDSRecomp-Setup-${{ matrix.platform }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SMTDSDSRecomp-Setup-${{ matrix.platform }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error

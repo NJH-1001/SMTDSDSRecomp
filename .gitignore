@@ -1,0 +1,17 @@
+/ghidra/
+/generated/
+/build*/
+/local/
+/saves/
+/captures/
+/dist/
+/rom/
+/bin/
+*.nds
+*.rom
+*.bin
+*.sav
+*.dsv
+*.ndshp
+*.log
+__pycache__/

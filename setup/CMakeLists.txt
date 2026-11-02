@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.20)
+project(SMTDSDSRecompSetup LANGUAGES CXX)
+add_executable(SMTDSDSRecomp-Setup main.cpp)
+target_compile_features(SMTDSDSRecomp-Setup PRIVATE cxx_std_17)
+if(MINGW)
+  target_link_options(SMTDSDSRecomp-Setup PRIVATE -static)
+endif()
