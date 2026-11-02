@@ -5,6 +5,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: native-setup-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   build:
     # Native compiler/linker and package checks only. No ROMs, retail dumps,

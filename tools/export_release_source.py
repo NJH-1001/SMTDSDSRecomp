@@ -57,6 +57,7 @@ def export(destination):
         keep|=rel.parts[0]=="bios" and rel.suffix==".toml"
         keep|=rel.parts[0]=="tools" and rel.name in helpers
         keep|=rel.as_posix()=="oracle/_client.py"
+        keep|=rel.as_posix()=="launcher/nds_input_bindings.h"
         keep|=rel.name in {"LICENSE","LICENSE-GPL","LICENSE-MIT","VERSION"} and len(rel.parts)==1
         # The open-source fallback BIOS is generated on the user's machine too.
         keep|=rel.as_posix()=="vendor/freebios/freebios_images.h"

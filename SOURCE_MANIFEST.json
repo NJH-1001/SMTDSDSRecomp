@@ -11,7 +11,7 @@
     "config/required-inputs.json": "dc3bc9e2d849863fefb862e15fc623d4e27b0c021ad9bd3508e54debc7969ccc",
     "tools/bootstrap_sdl.py": "75e42a42dee0323a403d719eb0010f16727a6637b792cab4be250e3abf3625cb",
     "tools/ci_compile.py": "1123d1ea560ca0a483fb50a8391676e9579433994bf7fde98315938dee2144fc",
-    "tools/export_release_source.py": "2a46465399b67dd4693a718e4bca145c2e0f805d76e0c68ea0dcb986ac799de4",
+    "tools/export_release_source.py": "9d13a326868b328d1c7df001e12c70dd25a516cc1117a34711af20a9b5220855",
     "tools/install.py": "14bb89691d5f401d7868c97bfb3dc9d18bd5fa61abcc9d575d6a04c9c6bc1853",
     "tools/package_release.py": "3511acaa29d1030f03e01c73071074577598b9bfab57080bc3a1a335e3558622",
     "tools/play.py": "6daabbe177f3858fda27f853bdba85622a36b48dfa57d3f7361f16bef466764c",
@@ -21,7 +21,7 @@
     "setup/main.cpp": "120e758ba6b957e795dedd9123f9e4dacc2f53e6297756a66deb7106e6315077",
     "docs/DISPLAY_OPTIONS.md": "21ef2ac6404df644bbd7ef4fe8bd6643ed86007f280ae0a764c64d979cf3a05d",
     "docs/KEYBOARD_CONTROLS.md": "7caffa129222ea9a99e9fccf461b8823264f77e8e79fffff31be79cfaf19c835",
-    ".github/workflows/setup-builds.yml": "5633432cf517313f98a1ef62aef78082451607336f43959c7943bd3f8626184e",
+    ".github/workflows/setup-builds.yml": "1f61b53f2500b657e9666ac0aa00c68058fbf91577627eda8e565f9dec657c37",
     "deps/ndsrecomp/bios/biosnds7.toml": "b5b625b19f52d867c97bc6f2a3929e997d3b2b11d5900a16393a8dafc29cb0d7",
     "deps/ndsrecomp/bios/biosnds9.toml": "9b6de4f9a832194ffbba6830d82758f4c2181cd252efbbeb708237a9c905c785",
     "deps/ndsrecomp/bios/firmware_banks/fw_arm7_calibration_save.toml": "1c74e1c0b24878f90b4d3a21f9a82e01072a01a4cabc0ffdb4624b7b685ab099",
@@ -506,6 +506,7 @@
     "deps/recomp-ui/src/common/recomp_runtime_ui_internal.h": "dbb3d065080e8c8376944d174c6503584d83c276a29925300bb2fd2c77fddb1e",
     "deps/recomp-ui/src/common/launcher_theme.h": "9248739339ac2afb7112ae3172e492faca788b91ad17389d8fd961f227721b6f",
     "game.toml": "dd41e44dfa3d60d3c20517c13437fc61e9ff026488c95d8b71f8b9162267a0a8",
-    ".gitattributes": "5a7adb9903a1edec5be60a2b8e4ddd033d9a985bb178941b61647265fc8fe6c4"
+    ".gitattributes": "5a7adb9903a1edec5be60a2b8e4ddd033d9a985bb178941b61647265fc8fe6c4",
+    "deps/ndsrecomp/launcher/nds_input_bindings.h": "07a40650f74bb10860b196e83e5d3eff3bc8d2143eda8cd04c87624125339c2a"
   }
 }
