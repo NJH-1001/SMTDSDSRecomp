@@ -172,7 +172,7 @@ class Installer:
             from bootstrap_sdl import prepare_sdl
             print("Building pinned SDL3 SDK locally",flush=True)
             self.args.prefix=prepare_sdl(self.work / "sdl-sdk",self.args.jobs)
-        for generation in range(1,5):
+        for generation in range(1,7):
             self.promote(manifests,generation)
             self.configure(self.work / "player",title=self.title_dir,frontend=True)
             self.run("cmake","--build",self.work / "player","--target","nds_runner","-j",self.args.jobs)

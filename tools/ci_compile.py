@@ -35,7 +35,7 @@ def main():
             run(rc,"--config",config,"--bin",image,"--out",banks,"--bank",bank,"--shards","1")
     run("cmake","-S",framework / "runner","-B",work / "player","-G","Ninja",
         "-DCMAKE_BUILD_TYPE=RelWithDebInfo","-DNDS_BOOTSTRAP_FIRMWARE=ON","-DNDS_ENABLE_COMPUTE_RENDERER=OFF",
-        f"-DNDS_GENERATED_DIR={banks}",f"-DNDS_RECOMP_UI_ROOT={ui}",f"-DCMAKE_PREFIX_PATH={args.prefix}")
+        f"-DNDS_GENERATED_DIR={banks}",f"-DNDS_RECOMP_UI_ROOT={ui}",f"-DCMAKE_PREFIX_PATH={args.prefix.resolve()}")
     run("cmake","--build",work / "player","--target","nds_runner","-j","3")
     print("Synthetic-input native player compiler/linker check passed; not a gameplay test")
 

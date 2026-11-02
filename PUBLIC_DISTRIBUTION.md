@@ -40,7 +40,7 @@ the framework's existing bounded dirty-RAM interpreter exception. It uses no
 discovery override, forced interpreter, direct boot or BIOS stub. The installer
 captures provenance locally, generates content-validated static banks, and
 rebuilds the player. Newly exposed generations are promoted locally for at most
-four passes. The installer fails unless both CPUs reach the verified hardware
+six passes. The installer fails unless both CPUs reach the verified hardware
 event and image hash, no clean-RAM execution is rejected, and final interpreted
 instruction counts are at most 16 ARM9 / 1 ARM7 on the accepted startup route.
 
